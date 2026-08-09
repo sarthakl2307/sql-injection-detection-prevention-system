@@ -1,139 +1,89 @@
+import os
 from flask import Flask, render_template, request, redirect
-import sqlite3
+from db_config import get_connection
 import re
-from datetime import datetime
+import webbrowser
 import smtplib
 from email.mime.text import MIMEText
+from dotenv import load_dotenv
+
+load_dotenv()  # loads variables from a local .env file (not committed to git)
 
 app = Flask(__name__)
 
-# ---------------- DATABASE CONNECTION ---------------- #
-
-def get_connection():
-
-    conn = sqlite3.connect("database.db")
-    conn.row_factory = sqlite3.Row
-
-    return conn
-
-
-# ---------------- CREATE TABLES ---------------- #
-
-conn = get_connection()
-cursor = conn.cursor()
-
-cursor.execute("""
-
-CREATE TABLE IF NOT EXISTS users (
-
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    username TEXT,
-    password TEXT
-
-)
-
-""")
-
-cursor.execute("""
-
-INSERT OR IGNORE INTO users (id, username, password)
-
-VALUES (1, 'admin', 'admin123')
-
-""")
-
-cursor.execute("""
-
-CREATE TABLE IF NOT EXISTS attack_logs (
-
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    input TEXT,
-    timestamp TEXT
-
-)
-
-""")
-
-conn.commit()
-conn.close()
-
-
-# ---------------- SQL INJECTION PATTERNS ---------------- #
-
-patterns = [
-
-    r"(\bOR\b|\bAND\b).*=.*",
-
-    r"(--|#|\/\*)",
-
-    r"\b(SELECT|INSERT|UPDATE|DELETE|DROP|UNION|ALTER|EXEC|CREATE|TRUNCATE)\b",
-
-    r"\bUNION\b.*\bSELECT\b",
-
-    r";",
-
-    r"\bSLEEP\s*\(",
-
-    r"\bWAITFOR\b",
-
-    r"\bINFORMATION_SCHEMA\b",
-
-    r"0x[0-9a-fA-F]+",
-
-    r"['\"]",
-
-    r"admin\s*--",
-
-    r"xp_cmdshell",
-
-    r"DROP\s+TABLE",
-
-    r"UNION\s+SELECT"
-
-]
-
-
-# ---------------- DETECTION FUNCTION ---------------- #
 
 def detect_sql_injection(user_input):
 
-    user_input = user_input.upper()
+    patterns = [
+
+        
+        r"(\bOR\b|\bAND\b)\s+\d+=\d+",
+
+        
+        r"(--|#|\/\*)",
+
+        
+        r"\b(SELECT|INSERT|UPDATE|DELETE|DROP|UNION|ALTER|EXEC)\b",
+
+        
+        r"\bUNION\b.*\bSELECT\b",
+
+        
+        r";",
+
+        
+        r"\bSLEEP\(|\bWAITFOR\b",
+
+        
+        r"\bINFORMATION_SCHEMA\b",
+
+        
+        r"0x[0-9a-fA-F]+",
+
+        
+        r"['\"]{2,}"
+    ]
+
+    
+    if len(user_input) > 50:
+        return True
 
     for pattern in patterns:
-
         if re.search(pattern, user_input, re.IGNORECASE):
-
             return True
 
     return False
 
 
-# ---------------- EMAIL ALERT ---------------- #
 
-def send_email_alert(message):
+def is_safe_input(user_input):
+    return re.match("^[a-zA-Z0-9_@. ]+$", user_input)
 
-    sender_email = "sarthaklakhadive22@gmail.com"
 
-    sender_password = "dcmv pqof wqbl ajjk"
+
+def send_alert(message):
+
+    sender_email = os.environ.get("ALERT_EMAIL")
+    sender_password = os.environ.get("ALERT_EMAIL_PASSWORD")
 
     receiver_emails = [
-
-    "sarthaklakhadive22@gmail.com",
-    "lakhadivesarthak@gmail.com",
-    "kshirsagar.rohit.ranjit123@gmail.com"
-
+        email.strip()
+        for email in os.environ.get("ALERT_RECEIVERS", "").split(",")
+        if email.strip()
     ]
+
+    if not sender_email or not sender_password or not receiver_emails:
+        # Alerting isn't configured — skip silently instead of crashing the request.
+        print("Email alert skipped: ALERT_EMAIL / ALERT_EMAIL_PASSWORD / ALERT_RECEIVERS not set.")
+        return
 
     msg = MIMEText(message)
 
-    msg['Subject'] = "SQL Injection Alert"
-
+    msg['Subject'] = "⚠ SQL Injection Alert"
     msg['From'] = sender_email
-
     msg['To'] = ", ".join(receiver_emails)
 
     try:
-
         server = smtplib.SMTP("smtp.gmail.com", 587)
 
         server.starttls()
@@ -148,86 +98,82 @@ def send_email_alert(message):
 
         server.quit()
 
-    except Exception as e:
 
-        print(e)
+    except Exception:
+        pass
 
 
-# ---------------- HOME PAGE ---------------- #
 
-@app.route('/')
-def home():
+@app.route('/', methods=['GET', 'POST'])
+def login():
+
+    if request.method == 'POST':
+
+        username = request.form['username']
+        password = request.form['password']
+
+        
+        ip_address = request.remote_addr
+
+        
+        if (not is_safe_input(username)) or \
+           (not is_safe_input(password)) or \
+           detect_sql_injection(username) or \
+           detect_sql_injection(password):
+
+            
+            alert_message = f"""
+SQL Injection Detected!
+
+Username Input: {username}
+Password Input: {password}
+IP Address: {ip_address}
+"""
+
+            
+            send_alert(alert_message)
+
+            
+            conn = get_connection()
+            cursor = conn.cursor()
+
+            cursor.execute(
+                """
+                INSERT INTO attack_logs (input_text)
+                VALUES (%s)
+                """,
+                (f"{username} | {password} | IP: {ip_address}",)
+            )
+
+            conn.commit()
+            conn.close()
+
+            return "⚠ SQL Injection Detected! Request Blocked."
+
+        
+        conn = get_connection()
+        cursor = conn.cursor()
+
+        query = """
+        SELECT * FROM users
+        WHERE username=%s AND password=%s
+        """
+
+        cursor.execute(query, (username, password))
+
+        result = cursor.fetchone()
+
+        conn.close()
+
+        if result:
+            return redirect('/dashboard')
+
+        else:
+            return "Invalid Credentials"
 
     return render_template('login.html')
 
 
-# ---------------- LOGIN ---------------- #
-
-@app.route('/login', methods=['POST'])
-def login():
-
-    username = request.form['username']
-    password = request.form['password']
-
-    combined_input = username + " " + password
-
-    # SQL Injection Detection
-    if detect_sql_injection(combined_input):
-
-        conn = get_connection()
-        cursor = conn.cursor()
-
-        cursor.execute("""
-
-        INSERT INTO attack_logs (input, timestamp)
-
-        VALUES (?, ?)
-
-        """, (combined_input, datetime.now()))
-
-        conn.commit()
-        conn.close()
-
-        # Send Email Alert
-        send_email_alert(
-
-            f"""
-SQL Injection Detected
-
-Username: {username}
-
-Password: {password}
-
-Time: {datetime.now()}
-"""
-        )
-
-        return redirect('/dashboard')
-
-    # Normal Login
-    conn = get_connection()
-    cursor = conn.cursor()
-
-    cursor.execute("""
-
-    SELECT * FROM users
-
-    WHERE username=? AND password=?
-
-    """, (username, password))
-
-    user = cursor.fetchone()
-
-    conn.close()
-
-    if user:
-
-        return redirect('/dashboard')
-
-    return "Invalid Username or Password"
-
-
-# ---------------- DASHBOARD ---------------- #
 
 @app.route('/dashboard')
 def dashboard():
@@ -235,30 +181,32 @@ def dashboard():
     conn = get_connection()
     cursor = conn.cursor()
 
-    cursor.execute("""
+    
+    cursor.execute("SELECT COUNT(*) FROM attack_logs")
+    count = cursor.fetchone()[0]
 
-    SELECT * FROM attack_logs
-    ORDER BY id DESC
-
-    """)
+    
+    cursor.execute(
+        """
+        SELECT * FROM attack_logs
+        ORDER BY timestamp DESC
+        """
+    )
 
     logs = cursor.fetchall()
-
-    count = len(logs)
 
     conn.close()
 
     return render_template(
-
         'dashboard.html',
         logs=logs,
         count=count
-
     )
 
 
-# ---------------- RUN APP ---------------- #
 
 if __name__ == '__main__':
+
+    webbrowser.open_new("http://127.0.0.1:5000")
 
     app.run(host='0.0.0.0', port=5000)
