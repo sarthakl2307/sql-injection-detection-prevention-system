@@ -1,6 +1,6 @@
 import os
 from flask import Flask, render_template, request, redirect
-from db_config import get_connection
+from db_config import get_connection, init_db
 import re
 import webbrowser
 import smtplib
@@ -10,6 +10,8 @@ from dotenv import load_dotenv
 load_dotenv()  # loads variables from a local .env file (not committed to git)
 
 app = Flask(__name__)
+
+init_db()  # ensures tables exist (and creates database.db if missing)
 
 
 def detect_sql_injection(user_input):
@@ -140,7 +142,7 @@ IP Address: {ip_address}
             cursor.execute(
                 """
                 INSERT INTO attack_logs (input_text)
-                VALUES (%s)
+                VALUES (?)
                 """,
                 (f"{username} | {password} | IP: {ip_address}",)
             )
@@ -156,7 +158,7 @@ IP Address: {ip_address}
 
         query = """
         SELECT * FROM users
-        WHERE username=%s AND password=%s
+        WHERE username=? AND password=?
         """
 
         cursor.execute(query, (username, password))
@@ -207,6 +209,9 @@ def dashboard():
 
 if __name__ == '__main__':
 
-    webbrowser.open_new("http://127.0.0.1:5000")
+    # Only auto-open a browser tab when running locally, not on Render
+    if os.environ.get("RENDER") is None:
+        webbrowser.open_new("http://127.0.0.1:5000")
 
-    app.run(host='0.0.0.0', port=5000)
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host='0.0.0.0', port=port)
